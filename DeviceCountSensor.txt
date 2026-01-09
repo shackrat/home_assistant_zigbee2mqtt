@@ -1,0 +1,106 @@
+
+{# Use {{ device_attr("light.the_light_in_your_zigbee_network", "via_device_id") }} to find the parent_device_id of your entity #}
+{% set parent_device_id = "7e32275795a7f713992a0544d7226584" %} {# Set to blank ("") to skip parent_device_id filtering #}
+
+{% set integration_filter = "mqtt" %}  {# Set to blank ("") to skip integration filtering #}
+
+{# Initialize namespaces for results #}
+{% set devices_with_available_entities = namespace(devices=[]) %}
+{% set devices_with_no_available_entities = namespace(devices=[]) %}
+{% set processed_entities = namespace(entities=[]) %}
+
+{# Initialize namespace to collect all devices and their entities #}
+{% set device_entities = namespace(mapping={}) %}
+
+{% set all_states = [] %}
+
+{# Apply integration filter if specified #}
+{% if integration_filter != "" %}
+  {% set all_states = integration_entities(integration_filter) %}
+{% else %}
+  {% set all_states = states | map(attribute='entity_id') %}
+{% endif %}
+
+{# First pass: collect ALL entities for each device #}
+{% for entity in all_states %}
+  {% set process_entity = true %}
+
+  {# Apply parent device filter if specified #}
+  {% if parent_device_id != "" %}
+    {% set via_device_id = device_attr(entity, "via_device_id") %}
+    {% if via_device_id != parent_device_id %}
+      {% set process_entity = false %}
+    {% endif %}
+  {% endif %}
+
+  {% if process_entity %}
+    {% set processed_entities.entities = processed_entities.entities + [entity] %}
+    {% set dev_id = device_id(entity) %}
+
+    {# Skip entities that aren't tied to a device #}
+    {% if not dev_id %}
+      {% set process_entity = false %}
+    {% endif %}
+
+    {# ONLY include physical Zigbee2MQTT devices (must have an identifier containing zigbee2mqtt_0x) #}
+    {% if process_entity %}
+      {% set ids = device_attr(dev_id, 'identifiers') %}
+      {% set z = namespace(is_physical=false) %}
+
+      {% if ids %}
+        {% for ident in ids %}
+          {# identifiers are often tuples like ('mqtt','zigbee2mqtt_0x....') #}
+          {% if ident is iterable and ident is not string and ident|length > 1 %}
+            {% set ident_str = ident[1] %}
+          {% else %}
+            {% set ident_str = ident %}
+          {% endif %}
+
+          {% set ident_l = (ident_str|string)|lower %}
+
+          {% if 'zigbee2mqtt_0x' in ident_l %}
+            {% set z.is_physical = true %}
+            {% break %}
+          {% endif %}
+        {% endfor %}
+      {% endif %}
+
+      {% if not z.is_physical %}
+        {% set process_entity = false %}
+      {% endif %}
+    {% endif %}
+
+    {% if process_entity %}
+      {# Initialize list for new device if needed #}
+      {% if dev_id not in device_entities.mapping %}
+        {% set device_entities.mapping = dict(device_entities.mapping, **{dev_id: []}) %}
+      {% endif %}
+
+      {# Add entity to device's list #}
+      {% set device_list = device_entities.mapping[dev_id] %}
+      {% set device_entities.mapping = dict(device_entities.mapping, **{dev_id: device_list + [entity]}) %}
+    {% endif %}
+  {% endif %}
+{% endfor %}
+
+{# Second pass: process each device with its complete list of entities #}
+{% for dev_id, entities in device_entities.mapping.items() %}
+  {% set ns = namespace(has_valid_state=false) %}
+
+  {% for entity in entities %}
+    {% if states(entity) not in ['unknown', 'unavailable'] %}
+      {% set ns.has_valid_state = true %}
+      {% break %}
+    {% endif %}
+  {% endfor %}
+
+  {# Categorize device based on entity availability #}
+  {% if ns.has_valid_state %}
+    {% set devices_with_available_entities.devices = devices_with_available_entities.devices + [dev_id] %}
+  {% else %}
+    {% set devices_with_no_available_entities.devices = devices_with_no_available_entities.devices + [dev_id] %}
+  {% endif %}
+{% endfor %}
+
+{# Output: count of devices with at least one available entity #}
+{{ devices_with_available_entities.devices | length }}
